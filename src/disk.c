@@ -2,9 +2,14 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "disk.h"
 #include "utils.h"
+
+/* Constants. */
+#define FILENAME_OFFSET     12
+#define FILENAME_LENGTH     40
 
 /* Functions. */
 
@@ -43,11 +48,12 @@ int disk_create(struct disk *d, unsigned int num_cylinders,
 
 int disk_read(struct disk *d, const char *filename)
 {
-    unsigned int i, j;
+    unsigned int i, j, max_j;
+    struct sector *s;
     FILE *fp;
     uint8_t b;
     uint16_t w, *sector_ptr;
-    int c;
+    int c, ret;
 
     fp = fopen(filename, "rb");
     if (unlikely(!fp)) {
@@ -56,7 +62,10 @@ int disk_read(struct disk *d, const char *filename)
         return FALSE;
     }
 
+    max_j = offsetof(struct sector, data) / sizeof(uint16_t);
     for (i = 0; i < d->length; i++) {
+        s = &d->sectors[i];
+
         /* Discard the first word. */
         c = fgetc(fp);
         if (unlikely(c == EOF)) goto error_premature_end;
@@ -64,8 +73,8 @@ int disk_read(struct disk *d, const char *filename)
         c = fgetc(fp);
         if (unlikely(c == EOF)) goto error_premature_end;
 
-        sector_ptr = (uint16_t *) &d->sectors[i];
-        for (j = 0; j < sizeof(struct sector) / sizeof(uint16_t); j++) {
+        sector_ptr = (uint16_t *) s;
+        for (j = 0; j < max_j; j++) {
             /* Process data in little endian format. */
             c = fgetc(fp);
             if (unlikely(c == EOF)) goto error_premature_end;
@@ -75,10 +84,13 @@ int disk_read(struct disk *d, const char *filename)
             c = fgetc(fp);
             if (unlikely(c == EOF)) goto error_premature_end;
             b = (uint8_t) c;
-            w = ((uint16_t) b) << 8;
+            w |= ((uint16_t) b) << 8;
 
             sector_ptr[j] = w;
         }
+
+        ret = fread(s->data, 1, sizeof(s->data), fp);
+        if (ret != sizeof(s->data)) goto error_premature_end;
     }
 
     c = fgetc(fp);
@@ -96,4 +108,28 @@ error_premature_end:
     fclose(fp);
     return FALSE;
 }
+
+void disk_print_summary(struct disk *d)
+{
+    unsigned int i, j;
+    struct sector *s;
+    char buffer[41];
+
+    buffer[sizeof(buffer) - 1] = '\0';
+    for (i = 0; i < d->length; i++) {
+        s = &d->sectors[i];
+        if (s->label.file_secnum != 0) continue;
+        if (s->label.fid[0] != 1) continue;
+
+        for (j = 0; j < FILENAME_LENGTH; j++) {
+            buffer[j ^ 1] = s->data[FILENAME_OFFSET + j];
+        }
+
+        j = (unsigned int) buffer[0];
+        buffer[j] = '\0';
+
+        printf("%u) %s\n", i, &buffer[1]);
+    }
+}
+
 

@@ -10,8 +10,20 @@
 /* Structure representing a sector. */
 struct sector {
     uint16_t header[2];           /* Sector header. */
-    uint16_t label[8];            /* Sector label. */
-    uint16_t data[256];           /* Sector data. */
+    struct {
+        uint16_t da_next;         /* The address of next sector. */
+        uint16_t da_prev;         /* The addres of previous sector. */
+        uint16_t unused;
+        uint16_t nbytes;          /* Number of bytes. */
+        uint16_t file_secnum;     /* Sector number of a file */
+        uint16_t fid[3];          /* File identification. */
+
+        /* fid[0] is 1 for used files, 0xffff for free sectors. */
+        /* fid[1] is 0x8000 for a directory, 0 for regular, 0xffff for free. */
+        /* fid[2] is the file_id. */
+
+    } label;
+    uint8_t data[512];            /* Sector data. */
 };
 
 /* Structure representing a disk. */
@@ -49,6 +61,9 @@ int disk_create(struct disk *d, unsigned int num_cylinders,
  * Returns TRUE on success.
  */
 int disk_read(struct disk *d, const char *filename);
+
+/* Prints a summary of the disk. */
+void disk_print_summary(struct disk *d);
 
 
 #endif /* __DISK_H */

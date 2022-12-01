@@ -56,6 +56,8 @@ int main(int argc, char **argv)
         goto error;
     }
 
+    disk_print_summary(&d);
+
     disk_destroy(&d);
     return 0;
 
