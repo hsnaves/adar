@@ -24,11 +24,18 @@ void disk_destroy(struct disk *d)
     d->sectors = NULL;
 }
 
-int disk_create(struct disk *d, unsigned int num_cylinders,
-                unsigned int num_heads, unsigned int num_sectors)
+int disk_create(struct disk *d, uint16_t num_cylinders,
+                uint16_t num_heads, uint16_t num_sectors)
 {
     size_t size;
     disk_initvar(d);
+
+    if (unlikely(num_heads > 2
+                 || num_sectors > 15
+                 || num_cylinders >= 512)) {
+        report_error("disk: create: invalid disk geometry");
+        return FALSE;
+    }
 
     d->num_cylinders = num_cylinders;
     d->num_heads = num_heads;
@@ -46,18 +53,18 @@ int disk_create(struct disk *d, unsigned int num_cylinders,
     return TRUE;
 }
 
-int disk_read(struct disk *d, const char *filename)
+int disk_load_image(struct disk *d, const char *filename)
 {
-    unsigned int i, j, max_j;
-    struct sector *s;
     FILE *fp;
-    uint8_t b;
+    struct sector *s;
+    uint16_t i, j, max_j;
     uint16_t w, *sector_ptr;
+    uint8_t b;
     int c, ret;
 
     fp = fopen(filename, "rb");
     if (unlikely(!fp)) {
-        report_error("disk: read: could not open file `%s`",
+        report_error("disk: load_image: could not open file `%s`",
                      filename);
         return FALSE;
     }
@@ -103,21 +110,88 @@ int disk_read(struct disk *d, const char *filename)
     return TRUE;
 
 error_premature_end:
-    report_error("disk: read: %s: premature end of file",
+    report_error("disk: load_image: %s: premature end of file",
                  filename);
     fclose(fp);
     return FALSE;
 }
 
-void disk_print_summary(struct disk *d)
+int disk_real_to_virtual(struct disk *d, uint16_t rda, uint16_t *vda)
 {
-    unsigned int i, j;
+    uint16_t cylinder, head, sector;
+
+    cylinder = (rda >> 3) & 0x1FF;
+    head = (rda >> 2) & 1;
+    sector = (rda >> 12) & 0xF;
+
+    if ((cylinder >= d->num_cylinders) || (head >= d->num_heads)
+        || (sector >= d->num_sectors || ((rda & 3) != 0))) {
+        report_error("disk: real_to_virtual: invalid rda = %u", rda);
+        return FALSE;
+    }
+
+    *vda = ((cylinder * d->num_heads) + head) * d->num_sectors + sector;
+    return TRUE;
+}
+
+int disk_virtual_to_real(struct disk *d, uint16_t vda, uint16_t *rda)
+{
+    uint16_t i, cylinder, head, sector;
+
+    if (vda >= d->length) {
+        report_error("disk: virtual_to_real: invalid vda = %u", vda);
+        return FALSE;
+    }
+
+    i = vda;
+    sector = i % d->num_sectors;
+    i /= d->num_sectors;
+    head = i % d->num_heads;
+    i /= d->num_heads;
+    cylinder = i;
+
+    *rda = (cylinder << 3) | (head << 2) | (sector << 12);
+    return TRUE;
+}
+
+int disk_file_length(struct disk *d, unsigned int first_vda, uint16_t *length)
+{
+    struct sector *s;
+    uint16_t vda, rda, l;
+
+    l = 0;
+    vda = first_vda;
+    while (vda != 0) {
+        if (vda >= d->length) {
+            report_error("disk: file_length: invalid sector");
+            return FALSE;
+        }
+        s = &d->sectors[vda];
+        if (vda != first_vda)
+            l += s->label.nbytes;
+
+        rda = s->label.rda_next;
+        if (unlikely(!disk_real_to_virtual(d, rda, &vda))) {
+            report_error("disk: file_length: error computing length");
+            return FALSE;
+        }
+    }
+
+    *length = l;
+    return TRUE;
+}
+
+int disk_print_summary(struct disk *d)
+{
+    unsigned int j;
+    uint16_t vda, length;
     struct sector *s;
     char buffer[41];
 
     buffer[sizeof(buffer) - 1] = '\0';
-    for (i = 0; i < d->length; i++) {
-        s = &d->sectors[i];
+    printf("VDA    SIZE   FILENAME\n");
+    for (vda = 0; vda < d->length; vda++) {
+        s = &d->sectors[vda];
         if (s->label.file_secnum != 0) continue;
         if (s->label.fid[0] != 1) continue;
 
@@ -128,8 +202,16 @@ void disk_print_summary(struct disk *d)
         j = (unsigned int) buffer[0];
         buffer[j] = '\0';
 
-        printf("%u) %s\n", i, &buffer[1]);
+        if (unlikely(!disk_file_length(d, vda, &length))) {
+            report_error("disk: print_summary: could not determine "
+                         "file length");
+            return FALSE;
+        }
+
+        printf("%-6u %-6u %-38s\n", vda, length, &buffer[1]);
     }
+
+    return TRUE;
 }
 
 

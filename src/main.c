@@ -51,8 +51,8 @@ int main(int argc, char **argv)
         goto error;
     }
 
-    if (unlikely(!disk_read(&d, disk_filename))) {
-        report_error("main: could not read disk");
+    if (unlikely(!disk_load_image(&d, disk_filename))) {
+        report_error("main: could not load disk image");
         goto error;
     }
 
