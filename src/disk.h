@@ -10,6 +10,7 @@
 
 /* Structure representing a sector. */
 struct sector {
+    uint16_t sector_vda;          /* The virtual address of the sector. */
     uint16_t header[2];           /* Sector header. */
     struct {
         uint16_t next_rda;        /* The (real) address of next sector. */
@@ -99,7 +100,7 @@ int disk_extract_file(const struct disk *d, uint16_t leader_vda,
  * Returns TRUE on success.
  */
 int disk_file_length(const struct disk *d, uint16_t leader_vda,
-                     uint16_t *length);
+                     size_t *length);
 
 /* Obtains the file times.
  * The virtual address of the leader sector of the file is in `leader_vda`.
@@ -121,20 +122,6 @@ int disk_print_summary(const struct disk *d);
  * Returns TRUE on success.
  */
 int disk_print_directory(const struct disk *d, uint16_t leader_vda);
-
-/* Converts a real address to a virtual address.
- * The real address is in `rda` and the virtual address is returned
- * in the `vda` parameter.
- * Returns TRUE on success.
- */
-int disk_real_to_virtual(const struct disk *d, uint16_t rda, uint16_t *vda);
-
-/* Converts a virtual address to a real address.
- * The virtual address is in `vda` and the real address is returned
- * in the `rda` parameter.
- * Returns TRUE on success.
- */
-int disk_virtual_to_real(const struct disk *d, uint16_t vda, uint16_t *rda);
 
 
 #endif /* __DISK_H */
