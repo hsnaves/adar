@@ -102,7 +102,7 @@ int disk_file_length(const struct disk *d, uint16_t leader_vda,
                      uint16_t *length);
 
 /* Obtains the file times.
- * The virtual address of the laeader sector of the file is in `leader_vda`.
+ * The virtual address of the leader sector of the file is in `leader_vda`.
  * The creation, last written, and access times are returned in
  * `created`, `written`, `read`, respectively.
  * Returns TRUE on success.
@@ -114,6 +114,13 @@ int disk_file_times(const struct disk *d, uint16_t leader_vda,
  * Returns TRUE on success.
  */
 int disk_print_summary(const struct disk *d);
+
+/* Prints the contents of a directory.
+ * The virtual address of the leader sector of the directory
+ * is in `leader_vda`.
+ * Returns TRUE on success.
+ */
+int disk_print_directory(const struct disk *d, uint16_t leader_vda);
 
 /* Converts a real address to a virtual address.
  * The real address is in `rda` and the virtual address is returned

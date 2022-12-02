@@ -97,7 +97,13 @@ int main(int argc, char **argv)
             report_error("main: could not print summary");
             goto error;
         }
+        printf("\n\n");
+        if (unlikely(!disk_print_directory(&d, 1))) {
+            report_error("main: could not print summary");
+            goto error;
+        }
     }
+
 
     disk_destroy(&d);
     return 0;

@@ -478,12 +478,6 @@ time_t get_alto_time(const uint8_t *src)
     return time;
 }
 
-/* Obtains the file times.
- * The virtual address of the laeader sector of the file is in `leader_vda`.
- * The creation, last written, and access times are returned in
- * `created`, `written`, `read`, respectively.
- * Returns TRUE on success.
- */
 int disk_file_times(const struct disk *d, uint16_t leader_vda,
                     time_t *created, time_t *written, time_t *read)
 {
@@ -535,6 +529,84 @@ int disk_print_summary(const struct disk *d)
                vda, file_id, filelen, ltm->tm_mday, ltm->tm_mon + 1,
                ltm->tm_year % 100, ltm->tm_hour, ltm->tm_min, ltm->tm_sec,
                &buffer[1]);
+    }
+
+    return TRUE;
+}
+
+int disk_print_directory(const struct disk *d, uint16_t leader_vda)
+{
+    uint16_t vda, rda, w;
+    uint16_t pos1, size1, pos2, tocopy;
+    uint16_t fid_type, file_id, version, file_leader_vda;
+    const struct sector *s;
+    char namebuf[FILENAME_LENGTH];
+    uint8_t buffer[64];
+    int is_valid;
+
+    if (leader_vda >= d->length) {
+        report_error("disk: print_directory: invalid leader_vda");
+        return FALSE;
+    }
+
+    printf("VDA    ID     VERSION  TYPE  FILENAME\n");
+
+    vda = leader_vda;
+    pos1 = 0;
+    size1 = 2;
+    is_valid = TRUE;
+    while (vda != 0) {
+        s = &d->sectors[vda];
+
+        if (vda != leader_vda) {
+            pos2 = 0;
+            while (pos2 < s->label.nbytes) {
+                tocopy = size1 - pos1;
+                if (tocopy > s->label.nbytes - pos2)
+                    tocopy = s->label.nbytes - pos2;
+                if (is_valid)
+                    memcpy(&buffer[pos1], &s->data[pos2], tocopy);
+                pos2 += tocopy;
+                pos1 += tocopy;
+
+                if (pos1 == size1) {
+                    if (size1 == 2) {
+                        w = buffer[0] + (buffer[1] << 8);
+                        is_valid = ((w >> 10) == 1);
+                        size1 = 2 * (w & 0x3FF);
+                        if (unlikely(size1 >= sizeof(buffer) && is_valid)) {
+                            report_error("disk: print_directory: large "
+                                         "directory entry");
+                            return FALSE;
+                        }
+                    } else {
+                        if (is_valid) {
+                            bswap_name(namebuf, (const char *) &buffer[12]);
+
+                            fid_type = buffer[2] + (buffer[3] << 8);
+                            file_id = buffer[4] + (buffer[5] << 8);
+                            version = buffer[6] + (buffer[7] << 8);
+                            file_leader_vda = buffer[10] + (buffer[11] << 8);
+
+                            printf("%-6u %-6u %-3u      %s     %-38s\n",
+                                   file_leader_vda, file_id, version,
+                                   (fid_type == 0) ? "f" : "d", &namebuf[1]);
+                        }
+
+                        pos1 = 0;
+                        size1 = 2;
+                        is_valid = TRUE;
+                    }
+                }
+            }
+        }
+
+        rda = s->label.next_rda;
+        if (unlikely(!disk_real_to_virtual(d, rda, &vda))) {
+            report_error("disk: print_directory: could not get "
+                         "next sector (%u)", vda);
+            return FALSE;
+        }
     }
 
     return TRUE;
