@@ -116,47 +116,234 @@ error_premature_end:
     return FALSE;
 }
 
-int disk_real_to_virtual(struct disk *d, uint16_t rda, uint16_t *vda)
+int disk_save_image(const struct disk *d, const char *filename)
 {
-    uint16_t cylinder, head, sector;
+    FILE *fp;
+    const struct sector *s;
+    uint16_t i, j, max_j, w;
+    const uint16_t *sector_ptr;
+    uint8_t b;
+    int c, ret;
 
-    cylinder = (rda >> 3) & 0x1FF;
-    head = (rda >> 2) & 1;
-    sector = (rda >> 12) & 0xF;
-
-    if ((cylinder >= d->num_cylinders) || (head >= d->num_heads)
-        || (sector >= d->num_sectors || ((rda & 3) != 0))) {
-        report_error("disk: real_to_virtual: invalid rda = %u", rda);
+    fp = fopen(filename, "wb");
+    if (unlikely(!fp)) {
+        report_error("disk: save_image: could not open file "
+                     "`%s` for writing",
+                     filename);
         return FALSE;
     }
 
-    *vda = ((cylinder * d->num_heads) + head) * d->num_sectors + sector;
-    return TRUE;
-}
+    max_j = offsetof(struct sector, data) / sizeof(uint16_t);
+    for (i = 0; i < d->length; i++) {
+        s = &d->sectors[i];
 
-int disk_virtual_to_real(struct disk *d, uint16_t vda, uint16_t *rda)
-{
-    uint16_t i, cylinder, head, sector;
+        /* Discard the first word. */
+        c = fputc(0, fp);
+        if (unlikely(c == EOF)) goto error_write;
 
-    if (vda >= d->length) {
-        report_error("disk: virtual_to_real: invalid vda = %u", vda);
-        return FALSE;
+        c = fputc(0, fp);
+        if (unlikely(c == EOF)) goto error_write;
+
+        sector_ptr = (const uint16_t *) s;
+        for (j = 0; j < max_j; j++) {
+            w = sector_ptr[j];
+
+            /* Process data in little endian format. */
+            b = (uint8_t) w;
+            c = fputc((int) b, fp);
+            if (unlikely(c == EOF)) goto error_write;
+
+            b = (uint8_t) (w >> 8);
+            c = fputc((int) b, fp);
+            if (unlikely(c == EOF)) goto error_write;
+        }
+
+        ret = fwrite(s->data, 1, sizeof(s->data), fp);
+        if (ret != sizeof(s->data)) goto error_write;
     }
 
-    i = vda;
-    sector = i % d->num_sectors;
-    i /= d->num_sectors;
-    head = i % d->num_heads;
-    i /= d->num_heads;
-    cylinder = i;
+    fclose(fp);
+    return TRUE;
 
-    *rda = (cylinder << 3) | (head << 2) | (sector << 12);
+error_write:
+    report_error("disk: save_image: %s: error while writing",
+                 filename);
+    fclose(fp);
+    return FALSE;
+}
+
+int disk_check_integrity(const struct disk *d)
+{
+    const struct sector *s, *other_s;
+    uint16_t vda, rda, other_vda;
+    int success;
+
+    success = TRUE;
+    for (vda = 0; vda < d->length; vda++) {
+        s = &d->sectors[vda];
+
+        if (unlikely(!disk_virtual_to_real(d, vda, &rda))) {
+            report_error("disk: check_integrity: "
+                         "could not convert virtual to real address");
+            return FALSE;
+        }
+
+        if (s->header[1] != rda || s->header[0] != 0) {
+            report_error("disk: check_integrity: "
+                         "invalid sector header at VDA = %u", vda);
+            success = FALSE;
+            continue;
+        }
+
+        if (s->label.fid[0] == 0xFFFF) continue;
+        if (s->label.fid[0] != 1) {
+            report_error("disk: check_integrity: "
+                         "invalid label fid presence at VDA = %u", vda);
+            success = FALSE;
+            continue;
+        }
+
+        if (s->label.fid[1] != 0x8000 && s->label.fid[1] != 0) {
+            report_error("disk: check_integrity: "
+                         "invalid label fid type at VDA = %u", vda);
+            success = FALSE;
+            continue;
+        }
+
+        if (s->label.nbytes > 512) {
+            report_error("disk: check_integrity: "
+                         "invalid label used bytes at VDA = %u", vda);
+            success = FALSE;
+            continue;
+        }
+
+        if (s->label.prev_rda != 0) {
+            if (!disk_real_to_virtual(d, s->label.prev_rda, &other_vda)) {
+                report_error("disk: check_integrity: "
+                             "invalid prev_rda at VDA = %u", vda);
+                success = FALSE;
+                continue;
+            }
+
+            other_s = &d->sectors[other_vda];
+            if (other_s->label.file_secnum + 1 != s->label.file_secnum) {
+                report_error("disk: check_integrity: "
+                             "discontiguous file_secnum (backwards) "
+                             "at VDA = %u", vda);
+                success = FALSE;
+                continue;
+            }
+
+            if (other_s->label.fid[2] != s->label.fid[2]) {
+                report_error("disk: check_integrity: "
+                             "differing file ids (backwards) "
+                             "at VDA = %u", vda);
+                success = FALSE;
+                continue;
+            }
+
+            /* First sector is special, so no test it. */
+            if (other_s->label.next_rda != rda && vda != 0) {
+                report_error("disk: check_integrity: "
+                             "broken link (backwards) at VDA = %u",
+                             vda);
+                success = FALSE;
+                continue;
+            }
+        } else {
+            if (s->label.file_secnum != 0) {
+                report_error("disk: check_integrity: "
+                             "file_secnum is not zero at VDA = %u", vda);
+                success = FALSE;
+                continue;
+            }
+        }
+
+        if (s->label.next_rda != 0) {
+            if (s->label.nbytes < 512) {
+                report_error("disk: check_integrity: "
+                             "short sector at VDA = %u", vda);
+                success = FALSE;
+                continue;
+            }
+
+            if (!disk_real_to_virtual(d, s->label.next_rda, &other_vda)) {
+                report_error("disk: check_integrity: "
+                             "invalid next_rda at VDA = %u", vda);
+                success = FALSE;
+                continue;
+            }
+
+            other_s = &d->sectors[other_vda];
+            if (other_s->label.file_secnum != s->label.file_secnum + 1) {
+                report_error("disk: check_integrity: "
+                             "discontiguous file_secnum (forward) "
+                             "at VDA = %u", vda);
+                success = FALSE;
+                continue;
+            }
+
+            if (other_s->label.fid[2] != s->label.fid[2]) {
+                report_error("disk: check_integrity: "
+                             "differing file ids (forward) "
+                             "at VDA = %u", vda);
+                success = FALSE;
+                continue;
+            }
+
+            /* First sector is special, so no test it. */
+            if (other_s->label.prev_rda != rda && vda != 0) {
+                report_error("disk: check_integrity: "
+                             "broken link (forward) at VDA = %u", vda);
+                success = FALSE;
+                continue;
+            }
+        }
+    }
+
+    return success;
+}
+
+int disk_print_summary(const struct disk *d)
+{
+    unsigned int j;
+    uint16_t vda, file_id, filelen;
+    const struct sector *s;
+    char buffer[41];
+
+    buffer[sizeof(buffer) - 1] = '\0';
+    printf("VDA    ID     SIZE   FILENAME\n");
+    for (vda = 0; vda < d->length; vda++) {
+        s = &d->sectors[vda];
+        if (s->label.file_secnum != 0) continue;
+        if (s->label.fid[0] != 1) continue;
+
+        for (j = 0; j < FILENAME_LENGTH; j++) {
+            buffer[j ^ 1] = s->data[FILENAME_OFFSET + j];
+        }
+
+        j = (unsigned int) buffer[0];
+        buffer[j] = '\0';
+
+        file_id = s->label.fid[2];
+
+        if (unlikely(!disk_file_length(d, vda, &filelen))) {
+            report_error("disk: print_summary: could not determine "
+                         "file length");
+            return FALSE;
+        }
+
+        printf("%-6u %-6u %-6u %-38s\n", vda, file_id,
+               filelen, &buffer[1]);
+    }
+
     return TRUE;
 }
 
-int disk_file_length(struct disk *d, unsigned int first_vda, uint16_t *length)
+int disk_file_length(const struct disk *d, unsigned int first_vda,
+                     uint16_t *length)
 {
-    struct sector *s;
+    const struct sector *s;
     uint16_t vda, rda, l;
 
     l = 0;
@@ -170,7 +357,7 @@ int disk_file_length(struct disk *d, unsigned int first_vda, uint16_t *length)
         if (vda != first_vda)
             l += s->label.nbytes;
 
-        rda = s->label.rda_next;
+        rda = s->label.next_rda;
         if (unlikely(!disk_real_to_virtual(d, rda, &vda))) {
             report_error("disk: file_length: error computing length");
             return FALSE;
@@ -181,36 +368,36 @@ int disk_file_length(struct disk *d, unsigned int first_vda, uint16_t *length)
     return TRUE;
 }
 
-int disk_print_summary(struct disk *d)
+int disk_real_to_virtual(const struct disk *d, uint16_t rda, uint16_t *vda)
 {
-    unsigned int j;
-    uint16_t vda, length;
-    struct sector *s;
-    char buffer[41];
+    uint16_t cylinder, head, sector;
 
-    buffer[sizeof(buffer) - 1] = '\0';
-    printf("VDA    SIZE   FILENAME\n");
-    for (vda = 0; vda < d->length; vda++) {
-        s = &d->sectors[vda];
-        if (s->label.file_secnum != 0) continue;
-        if (s->label.fid[0] != 1) continue;
+    cylinder = (rda >> 3) & 0x1FF;
+    head = (rda >> 2) & 1;
+    sector = (rda >> 12) & 0xF;
 
-        for (j = 0; j < FILENAME_LENGTH; j++) {
-            buffer[j ^ 1] = s->data[FILENAME_OFFSET + j];
-        }
+    if ((cylinder >= d->num_cylinders) || (head >= d->num_heads)
+        || (sector >= d->num_sectors || ((rda & 3) != 0)))
+        return FALSE;
 
-        j = (unsigned int) buffer[0];
-        buffer[j] = '\0';
+    *vda = ((cylinder * d->num_heads) + head) * d->num_sectors + sector;
+    return TRUE;
+}
 
-        if (unlikely(!disk_file_length(d, vda, &length))) {
-            report_error("disk: print_summary: could not determine "
-                         "file length");
-            return FALSE;
-        }
+int disk_virtual_to_real(const struct disk *d, uint16_t vda, uint16_t *rda)
+{
+    uint16_t i, cylinder, head, sector;
 
-        printf("%-6u %-6u %-38s\n", vda, length, &buffer[1]);
-    }
+    if (vda >= d->length) return FALSE;
 
+    i = vda;
+    sector = i % d->num_sectors;
+    i /= d->num_sectors;
+    head = i % d->num_heads;
+    i /= d->num_heads;
+    cylinder = i;
+
+    *rda = (cylinder << 3) | (head << 2) | (sector << 12);
     return TRUE;
 }
 

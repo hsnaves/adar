@@ -11,8 +11,8 @@
 struct sector {
     uint16_t header[2];           /* Sector header. */
     struct {
-        uint16_t rda_next;        /* The (real) address of next sector. */
-        uint16_t rda_prev;        /* The (real) addres of previous sector. */
+        uint16_t next_rda;        /* The (real) address of next sector. */
+        uint16_t prev_rda;        /* The (real) addres of previous sector. */
         uint16_t unused;
         uint16_t nbytes;          /* Number of used bytes in the sector. */
         uint16_t file_secnum;     /* Sector number of a file. */
@@ -62,31 +62,42 @@ int disk_create(struct disk *d, uint16_t num_cylinders,
  */
 int disk_load_image(struct disk *d, const char *filename);
 
-/* Converts a real address to a virtual address.
- * The real address is in `rda` and the virtual address is returned
- * in the `vda` parameter.
+/* Writes the contents of the disk to a file named `filename`.
  * Returns TRUE on success.
  */
-int disk_real_to_virtual(struct disk *d, uint16_t rda, uint16_t *vda);
+int disk_save_image(const struct disk *d, const char *filename);
 
-/* Converts a virtual address to a real address.
- * The virtual address is in `vda` and the real address is returned
- * in the `rda` parameter.
+/* Checks the integrity of the disk.
  * Returns TRUE on success.
  */
-int disk_virtual_to_real(struct disk *d, uint16_t vda, uint16_t *rda);
+int disk_check_integrity(const struct disk *d);
 
 /* Determines a file length.
  * The virtual address of the first sector of the file is in `first_vda`.
  * The file length is returned in `length`.
  * Returns TRUE on success.
  */
-int disk_file_length(struct disk *d, unsigned int first_vda, uint16_t *length);
+int disk_file_length(const struct disk *d, unsigned int first_vda,
+                     uint16_t *length);
 
 /* Prints a summary of the disk.
  * Returns TRUE on success.
  */
-int disk_print_summary(struct disk *d);
+int disk_print_summary(const struct disk *d);
+
+/* Converts a real address to a virtual address.
+ * The real address is in `rda` and the virtual address is returned
+ * in the `vda` parameter.
+ * Returns TRUE on success.
+ */
+int disk_real_to_virtual(const struct disk *d, uint16_t rda, uint16_t *vda);
+
+/* Converts a virtual address to a real address.
+ * The virtual address is in `vda` and the real address is returned
+ * in the `rda` parameter.
+ * Returns TRUE on success.
+ */
+int disk_virtual_to_real(const struct disk *d, uint16_t vda, uint16_t *rda);
 
 
 #endif /* __DISK_H */

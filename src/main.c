@@ -56,6 +56,11 @@ int main(int argc, char **argv)
         goto error;
     }
 
+    if (unlikely(!disk_check_integrity(&d))) {
+        report_error("main: invalid disk");
+        goto error;
+    }
+
     disk_print_summary(&d);
 
     disk_destroy(&d);
