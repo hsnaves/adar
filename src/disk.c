@@ -3,13 +3,17 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "disk.h"
 #include "utils.h"
 
 /* Constants. */
-#define FILENAME_OFFSET     12
-#define FILENAME_LENGTH     40
+#define CREATED_OFFSET          0
+#define WRITTEN_OFFSET          4
+#define READ_OFFSET             8
+#define FILENAME_OFFSET        12
+#define FILENAME_LENGTH        40
 
 /* Functions. */
 
@@ -60,7 +64,8 @@ int disk_load_image(struct disk *d, const char *filename)
     uint16_t i, j, max_j;
     uint16_t w, *sector_ptr;
     uint8_t b;
-    int c, ret;
+    size_t ret;
+    int c;
 
     fp = fopen(filename, "rb");
     if (unlikely(!fp)) {
@@ -123,7 +128,8 @@ int disk_save_image(const struct disk *d, const char *filename)
     uint16_t i, j, max_j, w;
     const uint16_t *sector_ptr;
     uint8_t b;
-    int c, ret;
+    size_t ret;
+    int c;
 
     fp = fopen(filename, "wb");
     if (unlikely(!fp)) {
@@ -172,10 +178,47 @@ error_write:
     return FALSE;
 }
 
+/* Swaps the bytes from the source `src` and writes them
+ * to the destination `dst`. The number of words to copy
+ * is given by `nwords`.
+ */
+static
+void bswap(char *dst, const char *src, uint16_t nwords)
+{
+    uint16_t j;
+    size_t k;
+
+    for (j = 0; j < nwords; j++) {
+        k = (size_t) j;
+        k += k;
+
+        dst[k] = src[k + 1];
+        dst[k + 1] = src[k];
+    }
+}
+
+/* Translates a name (perform byte swapping).
+ * The source is pointed by `src` and the destination by `dst`.
+ * The size of `dst` should be at least FILENAME_LENGTH.
+ */
+static
+void bswap_name(char *dst, const char *src)
+{
+    unsigned int j;
+
+    bswap(dst, src, FILENAME_LENGTH / 2);
+
+    j = (unsigned int) dst[0];
+    if (j >= FILENAME_LENGTH)
+        j = FILENAME_LENGTH - 1;
+    dst[j] = '\0';
+}
+
 int disk_check_integrity(const struct disk *d)
 {
     const struct sector *s, *other_s;
     uint16_t vda, rda, other_vda;
+    char buffer[FILENAME_LENGTH];
     int success;
 
     success = TRUE;
@@ -251,9 +294,24 @@ int disk_check_integrity(const struct disk *d)
                 continue;
             }
         } else {
+            if (s->label.nbytes < 512) {
+                report_error("disk: check_integrity: "
+                             "short leader sector at VDA = %u", vda);
+                success = FALSE;
+                continue;
+            }
+
             if (s->label.file_secnum != 0) {
                 report_error("disk: check_integrity: "
                              "file_secnum is not zero at VDA = %u", vda);
+                success = FALSE;
+                continue;
+            }
+
+            bswap_name(buffer, (char *) &s->data[FILENAME_OFFSET]);
+            if (((unsigned int) buffer[0]) >= FILENAME_LENGTH) {
+                report_error("disk: check_integrity: "
+                             "long name at VDA = %u", vda);
                 success = FALSE;
                 continue;
             }
@@ -304,57 +362,94 @@ int disk_check_integrity(const struct disk *d)
     return success;
 }
 
-int disk_print_summary(const struct disk *d)
+int disk_find_file(const struct disk *d, const char *name,
+                   uint16_t *leader_vda)
 {
-    unsigned int j;
-    uint16_t vda, file_id, filelen;
+    uint16_t vda;
     const struct sector *s;
-    char buffer[41];
+    char buffer[FILENAME_LENGTH];
 
-    buffer[sizeof(buffer) - 1] = '\0';
-    printf("VDA    ID     SIZE   FILENAME\n");
     for (vda = 0; vda < d->length; vda++) {
         s = &d->sectors[vda];
         if (s->label.file_secnum != 0) continue;
         if (s->label.fid[0] != 1) continue;
 
-        for (j = 0; j < FILENAME_LENGTH; j++) {
-            buffer[j ^ 1] = s->data[FILENAME_OFFSET + j];
-        }
+        bswap_name(buffer, (char *) &s->data[FILENAME_OFFSET]);
+        if (strcmp(&buffer[1], name) != 0) continue;
 
-        j = (unsigned int) buffer[0];
-        buffer[j] = '\0';
-
-        file_id = s->label.fid[2];
-
-        if (unlikely(!disk_file_length(d, vda, &filelen))) {
-            report_error("disk: print_summary: could not determine "
-                         "file length");
-            return FALSE;
-        }
-
-        printf("%-6u %-6u %-6u %-38s\n", vda, file_id,
-               filelen, &buffer[1]);
+        *leader_vda = vda;
+        return TRUE;
     }
 
+    return FALSE;
+}
+
+int disk_extract_file(const struct disk *d, uint16_t leader_vda,
+                      const char *filename, int include_leader)
+{
+    FILE *fp;
+    const struct sector *s;
+    char buffer[512];
+    uint16_t vda, rda;
+    size_t ret;
+
+    if (unlikely(leader_vda >= d->length)) {
+        report_error("disk: extract_file: leader_vda");
+        return FALSE;
+    }
+
+    fp = fopen(filename, "wb");
+    if (unlikely(!fp)) {
+        report_error("disk: extract_file: could not open "
+                     "`%s` for writing",
+                     filename);
+        return FALSE;
+    }
+
+    vda = leader_vda;
+    while (vda != 0) {
+        s = &d->sectors[vda];
+
+        if (vda != leader_vda || include_leader) {
+            bswap(buffer, (const char *) s->data, 256);
+            ret = fwrite(buffer, 1, s->label.nbytes, fp);
+            if (unlikely(ret != s->label.nbytes)) {
+                report_error("disk: extract_file: error while writing `%s`",
+                             filename);
+                fclose(fp);
+                return FALSE;
+            }
+        }
+
+        rda = s->label.next_rda;
+        if (unlikely(!disk_real_to_virtual(d, rda, &vda))) {
+            report_error("disk: extract_file: could not get next sector (%u)",
+                         vda);
+            fclose(fp);
+            return FALSE;
+        }
+    }
+
+    fclose(fp);
     return TRUE;
 }
 
-int disk_file_length(const struct disk *d, unsigned int first_vda,
+int disk_file_length(const struct disk *d, uint16_t leader_vda,
                      uint16_t *length)
 {
     const struct sector *s;
     uint16_t vda, rda, l;
 
+    if (leader_vda >= d->length) {
+        report_error("disk: file_length: invalid leader_vda");
+        return FALSE;
+    }
+
     l = 0;
-    vda = first_vda;
+    vda = leader_vda;
     while (vda != 0) {
-        if (vda >= d->length) {
-            report_error("disk: file_length: invalid sector");
-            return FALSE;
-        }
         s = &d->sectors[vda];
-        if (vda != first_vda)
+        if (vda != leader_vda)
             l += s->label.nbytes;
 
         rda = s->label.next_rda;
@@ -365,6 +460,83 @@ int disk_file_length(const struct disk *d, unsigned int first_vda,
     }
 
     *length = l;
+    return TRUE;
+}
+
+/* Obtains a time_t from the Alto filesystem. */
+static
+time_t get_alto_time(const uint8_t *src)
+{
+    time_t time;
+
+    time = (int) src[2];
+    time += (((int) src[3]) << 8);
+    time += (((int) src[0]) << 16);
+    time += (((int) src[1]) << 24);
+
+    time += 2117503696; /* magic value to convert to Unix epoch. */
+    return time;
+}
+
+/* Obtains the file times.
+ * The virtual address of the laeader sector of the file is in `leader_vda`.
+ * The creation, last written, and access times are returned in
+ * `created`, `written`, `read`, respectively.
+ * Returns TRUE on success.
+ */
+int disk_file_times(const struct disk *d, uint16_t leader_vda,
+                    time_t *created, time_t *written, time_t *read)
+{
+    const struct sector *s;
+
+    if (leader_vda >= d->length) {
+        report_error("disk: file_times: invalid leader_vda");
+        return FALSE;
+    }
+
+    s = &d->sectors[leader_vda];
+    *created = get_alto_time(&s->data[CREATED_OFFSET]);
+    *written = get_alto_time(&s->data[WRITTEN_OFFSET]);
+    *read = get_alto_time(&s->data[READ_OFFSET]);
+    return TRUE;
+}
+
+int disk_print_summary(const struct disk *d)
+{
+    uint16_t vda, file_id, filelen;
+    const struct sector *s;
+    char buffer[FILENAME_LENGTH];
+    time_t created, written, read;
+    struct tm *ltm;
+
+    printf("VDA    ID     SIZE   CREATED             FILENAME\n");
+    for (vda = 0; vda < d->length; vda++) {
+        s = &d->sectors[vda];
+        if (s->label.file_secnum != 0) continue;
+        if (s->label.fid[0] != 1) continue;
+
+        bswap_name(buffer, (char *) &s->data[FILENAME_OFFSET]);
+        file_id = s->label.fid[2];
+
+        if (unlikely(!disk_file_times(d, vda, &created, &written, &read))) {
+            report_error("disk: print_summary: could not determine "
+                         "file times");
+            return FALSE;
+        }
+
+        if (unlikely(!disk_file_length(d, vda, &filelen))) {
+            report_error("disk: print_summary: could not determine "
+                         "file length");
+            return FALSE;
+        }
+
+        ltm = localtime(&created);
+        printf("%-6u %-6u %-6u %02d-%02d-%02d %2d:%02d:%02d %-38s\n",
+               vda, file_id, filelen, ltm->tm_mday, ltm->tm_mon + 1,
+               ltm->tm_year % 100, ltm->tm_hour, ltm->tm_min, ltm->tm_sec,
+               &buffer[1]);
+    }
+
     return TRUE;
 }
 

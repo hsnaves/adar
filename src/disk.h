@@ -4,6 +4,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>
 
 /* Data structures and types. */
 
@@ -72,13 +73,42 @@ int disk_save_image(const struct disk *d, const char *filename);
  */
 int disk_check_integrity(const struct disk *d);
 
+/* Finds a file in the disk filesystem.
+ * The name of the file to find is given in `name`.
+ * The parameter `leader_vda` will contain the virtual address
+ * of the leader sector of the file.
+ * Returns TRUE on success.
+ */
+int disk_find_file(const struct disk *d, const char *name,
+                   uint16_t *leader_vda);
+
+/* Extracts a file from the disk.
+ * The `leader_vda` is the virtual address of the leader sector
+ * of the file in the disk. The `filename` specifies the filename
+ * to write on the user (native) filesystem. Lastly if `include_leader`
+ * is set to TRUE, this function will also dump the contents of the
+ * leader page.
+ * Returns TRUE on success.
+ */
+int disk_extract_file(const struct disk *d, uint16_t leader_vda,
+                      const char *filename, int include_leader);
+
 /* Determines a file length.
- * The virtual address of the first sector of the file is in `first_vda`.
+ * The virtual address of the leader sector of the file is in `leader_vda`.
  * The file length is returned in `length`.
  * Returns TRUE on success.
  */
-int disk_file_length(const struct disk *d, unsigned int first_vda,
+int disk_file_length(const struct disk *d, uint16_t leader_vda,
                      uint16_t *length);
+
+/* Obtains the file times.
+ * The virtual address of the laeader sector of the file is in `leader_vda`.
+ * The creation, last written, and access times are returned in
+ * `created`, `written`, `read`, respectively.
+ * Returns TRUE on success.
+ */
+int disk_file_times(const struct disk *d, uint16_t leader_vda,
+                    time_t *created, time_t *written, time_t *read);
 
 /* Prints a summary of the disk.
  * Returns TRUE on success.
