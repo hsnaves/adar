@@ -8,6 +8,23 @@
 #include "fs.h"
 #include "utils.h"
 
+/* Data structures and types. */
+
+/* Auxiliary data structure used by fs_find_file(). */
+struct find_result {
+    const char *filename;         /* The name of the searched file. */
+    size_t flen;                  /* Length of the filename. */
+    struct file_entry fe;         /* The file_entry of the file. */
+    int found;                    /* If the file was found. */
+};
+
+/* Auxiliary data structure used by fs_scavenge_file(). */
+struct scavenge_result {
+    const char *filename;         /* The name of the searched file. */
+    struct file_entry fe;         /* The file_entry of the file. */
+    int found;                    /* If the file was found. */
+};
+
 /* Constants. */
 
 /* Offsets within the page. */
@@ -20,18 +37,22 @@
 #define LEADER_WRITTEN                                4U
 #define LEADER_READ                                   8U
 #define LEADER_FILENAME                              12U
+#define LEADER_PROPS                                 52U
+#define LEADER_SPARE                                472U
+#define LEADER_PROPBEGIN                            492U
+#define LEADER_PROPLEN                              493U
+#define LEADER_CONSECUTIVE                          494U
+#define LEADER_CHANGESN                             495U
+#define LEADER_DIRFPHINT                            496U
+#define LEADER_LASTPAGEHINT                         506U
 
 /* Offsets within the directory entry. */
 #define DIRECTORY_SN                                  2U
 #define DIRECTORY_VERSION                             6U
-#define DIRECTORY_LEADER_VDA                          6U
+#define DIRECTORY_LEADER_VDA                         10U
 #define DIRECTORY_FILENAME                           12U
 
 /* Other constants. */
-#define FILE_TYPE_REGULAR                             0U
-#define FILE_TYPE_DIRECTORY                      0x8000U
-#define FILE_PRESENT                                  1U
-#define FILE_MISSING                             0xFFFFU
 #define DIR_ENTRY_VALID                               1U
 #define DIR_ENTRY_MISSING                             0U
 #define DIR_ENTRY_LEN_MASK                        0x3FFU
@@ -216,18 +237,21 @@ int fs_check_integrity(const struct fs *fs)
             continue;
         }
 
-        if (pg->label.presence == FILE_MISSING) continue;
-        if (pg->label.presence != FILE_PRESENT) {
-            report_error("fs: check_integrity: "
-                         "invalid label presence at VDA = %u", vda);
-            success = FALSE;
+        if (pg->label.version == VERSION_FREE) continue;
+        if (pg->label.version == VERSION_BAD) {
+            if (pg->label.sn.word1 != VERSION_BAD
+                || pg->label.sn.word2 != VERSION_BAD) {
+
+                report_error("fs: check_integrity: "
+                             "invalid bad page at VDA = %u", vda);
+                success = FALSE;
+            }
             continue;
         }
 
-        if (pg->label.sn.file_type != FILE_TYPE_REGULAR
-            && pg->label.sn.file_type != FILE_TYPE_DIRECTORY) {
+        if (pg->label.version == 0) {
             report_error("fs: check_integrity: "
-                         "invalid label file type at VDA = %u", vda);
+                         "invalid label version at VDA = %u", vda);
             success = FALSE;
             continue;
         }
@@ -256,8 +280,8 @@ int fs_check_integrity(const struct fs *fs)
                 continue;
             }
 
-            if (other_pg->label.sn.file_type != pg->label.sn.file_type
-                || other_pg->label.sn.file_id != pg->label.sn.file_id) {
+            if (other_pg->label.sn.word1 != pg->label.sn.word1
+                || other_pg->label.sn.word2 != pg->label.sn.word2) {
                 report_error("fs: check_integrity: "
                              "differing file serial numbers (backwards) "
                              "at VDA = %u", vda);
@@ -321,8 +345,8 @@ int fs_check_integrity(const struct fs *fs)
                 continue;
             }
 
-            if (other_pg->label.sn.file_type != pg->label.sn.file_type
-                || other_pg->label.sn.file_id != pg->label.sn.file_id) {
+            if (other_pg->label.sn.word1 != pg->label.sn.word1
+                || other_pg->label.sn.word2 != pg->label.sn.word2) {
                 report_error("fs: check_integrity: "
                              "differing file serial numbers (forward) "
                              "at VDA = %u", vda);
@@ -338,38 +362,11 @@ int fs_check_integrity(const struct fs *fs)
                 continue;
             }
         }
+
+        if (pg->label.prev_rda != 0) continue;
     }
 
     return success;
-}
-
-int fs_find_file(const struct fs *fs, const char *name,
-                 struct file_entry *fe)
-{
-    const struct page *pg;
-    uint16_t vda;
-    uint8_t slen;
-
-    for (vda = 0; vda < fs->length; vda++) {
-        pg = &fs->pages[vda];
-        if (pg->label.file_pgnum != 0) continue;
-        if (pg->label.presence != FILE_PRESENT) continue;
-
-        slen = pg->data[LEADER_FILENAME];
-        if (slen == 0) continue;
-        if (slen >= FILENAME_LENGTH)
-            slen = FILENAME_LENGTH - 1;
-        if (strncmp((const char *) &pg->data[LEADER_FILENAME + 1],
-                    name, (size_t) (slen - 1)) != 0) continue;
-
-        fe->sn = pg->label.sn;
-        fe->version = 1; /* TODO: populate this. */
-        fe->unused = 0;
-        fe->leader_vda = vda;
-        return TRUE;
-    }
-
-    return FALSE;
 }
 
 int fs_open(const struct fs *fs, const struct file_entry *fe,
@@ -488,8 +485,8 @@ int fs_file_entry(const struct fs *fs, uint16_t leader_vda,
 
     pg = &fs->pages[leader_vda];
     fe->sn = pg->label.sn;
-    fe->version = 1; /* TODO: populate this. */
-    fe->unused = 0;
+    fe->version = pg->label.version;
+    fe->blank = 0;
     fe->leader_vda = leader_vda;
     return TRUE;
 }
@@ -527,7 +524,142 @@ int fs_file_info(const struct fs *fs, const struct file_entry *fe,
     finfo->created = read_alto_time(pg->data, LEADER_CREATED);
     finfo->written = read_alto_time(pg->data, LEADER_WRITTEN);
     finfo->read = read_alto_time(pg->data, LEADER_READ);
+
+    memcpy(finfo->props, &pg->data[LEADER_PROPS], LEADER_SPARE - LEADER_PROPS);
+    finfo->props_len = pg->data[LEADER_PROPLEN];
+    finfo->props_begin = pg->data[LEADER_PROPBEGIN];
+
+    finfo->consecutive = pg->data[LEADER_CONSECUTIVE];
+    finfo->change_sn = pg->data[LEADER_CHANGESN];
+
+    finfo->dir_fe.sn.word1 = read_word_bs(pg->data, LEADER_DIRFPHINT);
+    finfo->dir_fe.sn.word2 = read_word_bs(pg->data, LEADER_DIRFPHINT + 2);
+    finfo->dir_fe.version = read_word_bs(pg->data, LEADER_DIRFPHINT + 4);
+    finfo->dir_fe.blank = read_word_bs(pg->data, LEADER_DIRFPHINT + 6);
+    finfo->dir_fe.leader_vda = read_word_bs(pg->data, LEADER_DIRFPHINT + 8);
+
+    finfo->last_page.vda = read_word_bs(pg->data, LEADER_LASTPAGEHINT);
+    finfo->last_page.pgnum = read_word_bs(pg->data, LEADER_LASTPAGEHINT + 2);
+    finfo->last_page.pos = read_word_bs(pg->data, LEADER_LASTPAGEHINT + 4);
     return TRUE;
+}
+
+/* Auxiliary callback used by fs_find_file().
+ * The `arg` parameter is a pointer to find_result structure.
+ */
+static
+int find_file_cb(const struct fs *fs,
+                 const struct directory_entry *de,
+                 void *arg)
+{
+    struct find_result *res;
+    struct file_info finfo;
+
+    res = (struct find_result *) arg;
+    if (unlikely(!fs_file_info(fs, &de->fe, &finfo))) return -1;
+
+    if (strncmp(finfo.filename, res->filename, res->flen) == 0) {
+        res->fe = de->fe;
+        res->found = TRUE;
+        /* Stop the search in this directory. */
+        return 0;
+    }
+    return 1;
+}
+
+int fs_find_file(const struct fs *fs, const char *filename,
+                 struct file_entry *fe)
+{
+    struct find_result res;
+    struct file_entry root_fe;
+    struct file_entry cur_fe;
+    size_t pos, npos;
+
+    if (unlikely(!fs_file_entry(fs, 1, &root_fe)))
+        return FALSE;
+
+    pos = 0;
+    cur_fe = root_fe;
+    while (filename[pos]) {
+        if (filename[pos] == '<') {
+            cur_fe = root_fe;
+            pos++;
+            continue;
+        }
+
+        npos = pos + 1;
+        while (filename[npos]) {
+            if (filename[npos] == '<' || filename[npos] == '>')
+                break;
+            npos++;
+        }
+
+        res.filename = &filename[pos];
+        res.flen = npos - pos;
+        res.found = FALSE;
+
+        if (res.flen >= FILENAME_LENGTH) return FALSE;
+
+        if (unlikely(!fs_scan_directory(fs, &cur_fe, &find_file_cb, &res)))
+            return FALSE;
+
+        if (!res.found) return FALSE;
+        cur_fe = res.fe;
+
+        if (filename[npos] == '>') {
+            /* Checks if its a directory. */
+            if (!(cur_fe.sn.word1 & SN_DIRECTORY)) return FALSE;
+            npos++;
+        }
+
+        pos = npos;
+    }
+
+    *fe = cur_fe;
+    return TRUE;
+}
+
+
+/* Auxiliary callback used by fs_scavenge_file().
+ * The `arg` parameter is a pointer to find_result structure.
+ */
+static
+int scavenge_file_cb(const struct fs *fs,
+                     const struct file_entry *fe,
+                     void *arg)
+{
+    struct scavenge_result *res;
+    struct file_info finfo;
+
+    res = (struct scavenge_result *) arg;
+    if (unlikely(!fs_file_info(fs, fe, &finfo))) return -1;
+
+    if (strcmp(finfo.filename, res->filename) == 0) {
+        res->fe = *fe;
+        res->found++;
+        /* Continue the search (to check if there exists only one
+         * file with the given name).
+         */
+    }
+    return 1;
+}
+
+int fs_scavenge_file(const struct fs *fs, const char *filename,
+                     struct file_entry *fe)
+{
+    struct scavenge_result res;
+
+    res.filename = filename;
+    res.found = 0;
+    if (unlikely(!fs_scan_files(fs, &scavenge_file_cb, &res)))
+        return FALSE;
+
+    if (res.found == 1) {
+        *fe = res.fe;
+        return TRUE;
+    }
+
+    return FALSE;
 }
 
 int fs_scan_files(const struct fs *fs, scan_files_cb cb, void *arg)
@@ -540,11 +672,13 @@ int fs_scan_files(const struct fs *fs, scan_files_cb cb, void *arg)
     for (vda = 0; vda < fs->length; vda++) {
         pg = &fs->pages[vda];
         if (pg->label.file_pgnum != 0) continue;
-        if (pg->label.presence != FILE_PRESENT) continue;
+        if (pg->label.version == VERSION_FREE) continue;
+        if (pg->label.version == VERSION_BAD) continue;
+        if (pg->label.version == 0) continue;
 
         fe.sn = pg->label.sn;
-        fe.version = 1; /* TODO: populate this. */
-        fe.unused = 0;
+        fe.version = pg->label.version;
+        fe.blank = 0;
         fe.leader_vda = vda;
 
         ret = cb(fs, &fe, arg);
@@ -594,8 +728,8 @@ int fs_scan_directory(const struct fs *fs, const struct file_entry *fe,
 
         if (!is_valid) continue;
 
-        de.fe.sn.file_type = read_word_bs(buffer, DIRECTORY_SN);
-        de.fe.sn.file_id = read_word_bs(buffer, 2 + DIRECTORY_SN);
+        de.fe.sn.word1 = read_word_bs(buffer, DIRECTORY_SN);
+        de.fe.sn.word2 = read_word_bs(buffer, 2 + DIRECTORY_SN);
         de.fe.version = read_word_bs(buffer, DIRECTORY_VERSION);
         de.fe.leader_vda = read_word_bs(buffer, DIRECTORY_LEADER_VDA);
         copy_name(de.filename, (const char *) &buffer[DIRECTORY_FILENAME]);
