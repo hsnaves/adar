@@ -1,5 +1,5 @@
-OBJS := $(OBJS) disk.o main.o utils.o
+OBJS := $(OBJS) fs.o main.o utils.o
 
-disk.o: disk.c disk.h utils.h
-main.o: main.c disk.h utils.h
+fs.o: fs.c fs.h utils.h
+main.o: main.c fs.h utils.h
 utils.o: utils.c utils.h

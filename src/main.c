@@ -2,9 +2,78 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "disk.h"
+#include "fs.h"
 #include "utils.h"
 
+/* Callback to print the files in the filesystem. */
+static
+int print_files_cb(const struct fs *fs,
+                   const struct file_entry *fe,
+                   void *arg)
+{
+    struct file_info finfo;
+    size_t length;
+
+    if (unlikely(!fs_file_info(fs, fe, &finfo))) {
+        report_error("main: could not get file information");
+        return -1;
+    }
+
+    if (unlikely(!fs_file_length(fs, fe, &length))) {
+        report_error("main: could not get file length");
+        return -1;
+    }
+
+    printf("%-6o %-6o   %-6o  %-38s\n",
+           fe->leader_vda, fe->sn.file_id, (unsigned int) length,
+           finfo.filename);
+
+    return 1;
+}
+
+/* Main function to print the files in the filesystem.
+ * Returns TRUE on success.
+ */
+static
+int print_files(const struct fs *fs)
+{
+    printf("VDA    FILE_ID  SIZE    FILENAME\n");
+    if (unlikely(!fs_scan_files(fs, &print_files_cb, NULL))) {
+        report_error("main: could not print files");
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/* Callback to print the files in the directory. */
+static
+int print_directory_cb(const struct fs *fs,
+                       const struct directory_entry *de,
+                       void *arg)
+{
+    printf("%-6o %-6o   %-6o     %-38s\n",
+           de->fe.leader_vda, de->fe.sn.file_id,
+           de->fe.version, de->filename);
+
+    return 1;
+}
+
+/* Main function to print the files in the directory pointed by `fe`.
+ * Returns TRUE on success.
+ */
+static
+int print_directory(const struct fs *fs, const struct file_entry *fe)
+{
+    printf("VDA    FILE_ID  VERSION    FILENAME\n");
+    if (unlikely(!fs_scan_directory(fs, fe, &print_directory_cb, NULL))) {
+        report_error("main: could not print directory");
+        return FALSE;
+    }
+    return TRUE;
+}
+
+
+/* Prints the usage information to the console output. */
 static
 void usage(const char *prog_name)
 {
@@ -21,20 +90,18 @@ int main(int argc, char **argv)
 
     const char *disk_filename;
     const char *extract_filename;
-    unsigned int num_cylinders;
-    unsigned int num_heads;
-    unsigned int num_sectors;
-    struct disk d;
-    uint16_t leader_vda;
+    struct geometry dg;
+    struct fs fs;
+    struct file_entry fe;
     int i, is_last, print_summary;
 
     disk_filename = NULL;
     extract_filename = NULL;
     print_summary = FALSE;
 
-    num_cylinders = 203;
-    num_heads = 2;
-    num_sectors = 12;
+    dg.num_cylinders = 203;
+    dg.num_heads = 2;
+    dg.num_sectors = 12;
 
     for (i = 1; i < argc; i++) {
         is_last = (i + 1 == argc);
@@ -60,31 +127,30 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    disk_initvar(&d);
+    fs_initvar(&fs);
 
-    if (unlikely(!disk_create(&d, num_cylinders, num_heads, num_sectors))) {
+    if (unlikely(!fs_create(&fs, dg))) {
         report_error("main: could not create disk");
         goto error;
     }
 
-    if (unlikely(!disk_load_image(&d, disk_filename))) {
+    if (unlikely(!fs_load_image(&fs, disk_filename))) {
         report_error("main: could not load disk image");
         goto error;
     }
 
-    if (unlikely(!disk_check_integrity(&d))) {
+    if (unlikely(!fs_check_integrity(&fs))) {
         report_error("main: invalid disk");
         goto error;
     }
 
     if (extract_filename != NULL) {
-        if (unlikely(!disk_find_file(&d, extract_filename, &leader_vda))) {
+        if (unlikely(!fs_find_file(&fs, extract_filename, &fe))) {
             report_error("main: could not find %s", extract_filename);
             goto error;
         }
 
-        if (unlikely(!disk_extract_file(&d, leader_vda,
-                                        extract_filename, FALSE))) {
+        if (unlikely(!fs_extract_file(&fs, &fe, extract_filename))) {
             report_error("main: could not extract %s", extract_filename);
             goto error;
         }
@@ -93,22 +159,21 @@ int main(int argc, char **argv)
     }
 
     if (print_summary) {
-        if (unlikely(!disk_print_summary(&d))) {
-            report_error("main: could not print summary");
-            goto error;
-        }
+        if (unlikely(!print_files(&fs))) goto error;
         printf("\n\n");
-        if (unlikely(!disk_print_directory(&d, 1))) {
-            report_error("main: could not print summary");
-            goto error;
+
+        if (unlikely(!fs_file_entry(&fs, 1, &fe))) {
+            report_error("main: could not find main directory");
         }
+
+        if (unlikely(!print_directory(&fs, &fe))) goto error;
     }
 
 
-    disk_destroy(&d);
+    fs_destroy(&fs);
     return 0;
 
 error:
-    disk_destroy(&d);
+    fs_destroy(&fs);
     return 1;
 }
