@@ -246,6 +246,7 @@ int main(int argc, char **argv)
         goto error;
     }
 
+    printf("loading disk image `%s`\n", disk_filename);
     if (!fs_load_image(&fs, disk_filename)) {
         report_error("main: could not load disk image");
         goto error;
@@ -311,10 +312,15 @@ int main(int argc, char **argv)
             report_error("main: could not replace file");
             goto error;
         }
+
+        printf("replaced `%s` successfully\n", replace_filename);
+
         if (!fs_save_image(&fs, disk_filename)) {
             report_error("main: could not save image");
             goto error;
         }
+
+        printf("disk image `%s` written successfully\n", disk_filename);
     }
 
     fs_destroy(&fs);
