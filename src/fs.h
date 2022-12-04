@@ -69,6 +69,7 @@ struct file_position {
 struct open_file {
     struct file_entry fe;         /* The file_entry information. */
     struct file_position pos;     /* The file_position information. */
+    int error;                    /* Indicates the file has error. */
 };
 
 /* Structure representing a filesystem page (sector). */
@@ -106,10 +107,6 @@ struct file_info {
     time_t created;                 /* The time the file was created. */
     time_t written;                 /* The time the file was written. */
     time_t read;                    /* The time the file was accessed. */
-
-    uint8_t props[420];             /* Properties of the file. */
-    uint8_t props_len;              /* Length of props. */
-    uint8_t props_begin;            /* Offset of props. */
 
     uint8_t consecutive;            /* The consecutive value. */
     uint8_t change_sn;              /* The change serial number value. */
@@ -186,13 +183,14 @@ int fs_save_image(const struct fs *fs, const char *filename);
  */
 int fs_check_integrity(const struct fs *fs);
 
-/* Opens a file for reading.
- * The file is specified by `fe` and the open file is stored in
- * `of`.
+/* Opens a file for reading or writing.
+ * The file is specified by `fe` and the open file is stored in `of`.
+ * If `include_leader` is TRUE, it starts reading or writing from
+ * the leader page.
  * Returns TRUE on success.
  */
 int fs_open(const struct fs *fs, const struct file_entry *fe,
-            struct open_file *of);
+            struct open_file *of, int include_leader);
 
 /* Reads `len` bytes of an open file `of` to `dst`.
  * If `dst` is NULL, the file pointer in `of` is still updated,
@@ -202,6 +200,21 @@ int fs_open(const struct fs *fs, const struct file_entry *fe,
 size_t fs_read(const struct fs *fs, struct open_file *of,
                uint8_t *dst, size_t len);
 
+/* Writes `len` bytes of an open file `of` from `src`.  If `src` is
+ * NULL, the file is zeroed. The parameter `extends` tells the function
+ * to allocate free pages when it reaches the end of the file,
+ * thereby extending the existing file.
+ * Returns the number of written bytes.
+ */
+size_t fs_write(struct fs *fs, struct open_file *of,
+                const uint8_t *src, size_t len, int extend);
+
+/* Trims the file to have the size matching the current position
+ * in the file.
+ * Returns TRUE on success.
+ */
+int fs_trim(struct fs *fs, struct open_file *of);
+
 /* Extracts a file from the filesystem.
  * The `fe` contains information about the location of the file in
  * in the filesystem. The `output_filename` specifies the filename
@@ -210,6 +223,16 @@ size_t fs_read(const struct fs *fs, struct open_file *of,
  */
 int fs_extract_file(const struct fs *fs, const struct file_entry *fe,
                     const char *output_filename);
+
+/* Replaces a file from the filesystem.
+ * Note: the file must currently exist in the filesystem!
+ * The `fe` contains information about the location of the file
+ * to be replaced. The `input_filename` specifies the filename
+ * of the input file to read from.
+ * Returns TRUE on success.
+ */
+int fs_replace_file(struct fs *fs, const struct file_entry *fe,
+                    const char *input_filename);
 
 /* Converts the virtual disk address of the leader page `leader_vda` of a
  * file to a file_entry object `fe`.

@@ -115,17 +115,21 @@ int fs_load_image(struct fs *fs, const char *filename)
     int c;
 
     fp = fopen(filename, "rb");
-    if (unlikely(!fp)) return FALSE;
+    if (!fp) {
+        report_error("fs: load_image: could not open `%s`",
+                     filename);
+        return FALSE;
+    }
 
     meta_len = PAGE_DATA / sizeof(uint16_t);
     for (vda = 0; vda < fs->length; vda++) {
         pg = &fs->pages[vda];
 
         c = fgetc(fp);
-        if (unlikely(c == EOF)) goto error;
+        if (c == EOF) goto error;
 
         c = fgetc(fp);
-        if (unlikely(c == EOF)) goto error;
+        if (c == EOF) goto error;
 
         /* Discard the first word and use the loop index instead. */
         pg->page_vda = vda;
@@ -134,11 +138,11 @@ int fs_load_image(struct fs *fs, const char *filename)
         for (j = 1; j < meta_len; j++) {
             /* Process data in little endian format. */
             c = fgetc(fp);
-            if (unlikely(c == EOF)) goto error;
+            if (c == EOF) goto error;
             w = (uint16_t) (c & 0xFF);
 
             c = fgetc(fp);
-            if (unlikely(c == EOF)) goto error;
+            if (c == EOF) goto error;
             w |= (uint16_t) ((c & 0xFF) << 8);
 
             meta_ptr[j] = w;
@@ -146,7 +150,7 @@ int fs_load_image(struct fs *fs, const char *filename)
 
         for (j = 0; j < PAGE_DATA_SIZE; j++) {
             c = fgetc(fp);
-            if (unlikely(c == EOF)) goto error;
+            if (c == EOF) goto error;
 
             /* Byte swap the data here. */
             pg->data[j ^ 1] = (uint8_t) c;
@@ -154,12 +158,14 @@ int fs_load_image(struct fs *fs, const char *filename)
     }
 
     c = fgetc(fp);
-    if (unlikely(c != EOF)) return FALSE;
+    if (c != EOF) goto error;
 
     fclose(fp);
     return TRUE;
 
 error:
+    report_error("fs: load_image: premature end of file in `%s`",
+                 filename);
     fclose(fp);
     return FALSE;
 }
@@ -173,7 +179,11 @@ int fs_save_image(const struct fs *fs, const char *filename)
     int c;
 
     fp = fopen(filename, "wb");
-    if (unlikely(!fp)) return FALSE;
+    if (!fp) {
+        report_error("fs: save_image: could not open file `%s` "
+                     "for writing", filename);
+        return FALSE;
+    }
 
     meta_len = PAGE_DATA / sizeof(uint16_t);
     for (vda = 0; vda < fs->length; vda++) {
@@ -181,27 +191,27 @@ int fs_save_image(const struct fs *fs, const char *filename)
 
         /* Discard the first word. */
         c = fputc((int) (vda & 0xFF), fp);
-        if (unlikely(c == EOF)) goto error;
+        if (c == EOF) goto error;
 
         c = fputc((int) ((vda >> 8) & 0xFF), fp);
-        if (unlikely(c == EOF)) goto error;
+        if (c == EOF) goto error;
 
         meta_ptr = (const uint16_t *) pg;
-        for (j = 0; j < meta_len; j++) {
+        for (j = 1; j < meta_len; j++) {
             w = meta_ptr[j];
 
             /* Process data in little endian format. */
             c = fputc((int) (w & 0xFF), fp);
-            if (unlikely(c == EOF)) goto error;
+            if (c == EOF) goto error;
 
             c = fputc((int) ((w >> 8) & 0xFF), fp);
-            if (unlikely(c == EOF)) goto error;
+            if (c == EOF) goto error;
         }
 
         for (j = 0; j < PAGE_DATA_SIZE; j++) {
             /* Byte swap the data here. */
             c = fputc((int) pg->data[j ^ 1], fp);
-            if (unlikely(c == EOF)) goto error;
+            if (c == EOF) goto error;
         }
     }
 
@@ -209,11 +219,18 @@ int fs_save_image(const struct fs *fs, const char *filename)
     return TRUE;
 
 error:
+    report_error("fs: save_image: error while writing `%s`",
+                 filename);
     fclose(fp);
     return FALSE;
 }
 
-int fs_check_integrity(const struct fs *fs)
+/* Auxiliary function to fs_check_integrity() [stage1].
+ * Checks some basic filesystem consistency.
+ * Returns TRUE on success.
+ */
+static
+int check_integrity_stage1(const struct fs *fs)
 {
     const struct page *pg, *other_pg;
     uint16_t vda, rda, other_vda;
@@ -224,15 +241,15 @@ int fs_check_integrity(const struct fs *fs)
     for (vda = 0; vda < fs->length; vda++) {
         pg = &fs->pages[vda];
 
-        if (unlikely(!virtual_to_real(fs, vda, &rda))) {
-            report_error("fs: check_integrity: "
-                         "could not convert virtual to real address");
+        if (!virtual_to_real(fs, vda, &rda)) {
+            report_error("fs: check_integrity: could not convert "
+                         "virtual to real disk address: %u", vda);
             return FALSE;
         }
 
         if (pg->header[1] != rda || pg->header[0] != 0) {
             report_error("fs: check_integrity: "
-                         "invalid sector header at VDA = %u", vda);
+                         "invalid page header at VDA = %u", vda);
             success = FALSE;
             continue;
         }
@@ -289,7 +306,7 @@ int fs_check_integrity(const struct fs *fs)
                 continue;
             }
 
-            /* First sector is special, so no test it. */
+            /* First page is special, so not test it. */
             if (other_pg->label.next_rda != rda && vda != 0) {
                 report_error("fs: check_integrity: "
                              "broken link (backwards) at VDA = %u",
@@ -300,7 +317,7 @@ int fs_check_integrity(const struct fs *fs)
         } else {
             if (pg->label.nbytes < PAGE_DATA_SIZE) {
                 report_error("fs: check_integrity: "
-                             "short leader sector at VDA = %u", vda);
+                             "short leader page at VDA = %u", vda);
                 success = FALSE;
                 continue;
             }
@@ -315,7 +332,7 @@ int fs_check_integrity(const struct fs *fs)
             slen = pg->data[LEADER_FILENAME];
             if (slen == 0 || slen >= FILENAME_LENGTH) {
                 report_error("fs: check_integrity: "
-                             "invalid name at VDA = %u", vda);
+                             "invalid filename at VDA = %u", vda);
                 success = FALSE;
                 continue;
             }
@@ -324,7 +341,7 @@ int fs_check_integrity(const struct fs *fs)
         if (pg->label.next_rda != 0) {
             if (pg->label.nbytes < PAGE_DATA_SIZE) {
                 report_error("fs: check_integrity: "
-                             "short sector at VDA = %u", vda);
+                             "short page at VDA = %u", vda);
                 success = FALSE;
                 continue;
             }
@@ -354,10 +371,11 @@ int fs_check_integrity(const struct fs *fs)
                 continue;
             }
 
-            /* First sector is special, so no test it. */
+            /* First page is special, so not test it. */
             if (other_pg->label.prev_rda != rda && vda != 0) {
                 report_error("fs: check_integrity: "
-                             "broken link (forward) at VDA = %u", vda);
+                             "broken link (forward) at VDA = %u",
+                             vda);
                 success = FALSE;
                 continue;
             }
@@ -369,25 +387,39 @@ int fs_check_integrity(const struct fs *fs)
     return success;
 }
 
+int fs_check_integrity(const struct fs *fs)
+{
+    if (!check_integrity_stage1(fs)) return FALSE;
+    return TRUE;
+}
+
 int fs_open(const struct fs *fs, const struct file_entry *fe,
-            struct open_file *of)
+            struct open_file *of, int include_leader)
 {
     const struct page *pg;
     uint16_t rda;
 
-    if (unlikely(fe->leader_vda >= fs->length))
+    if (fe->leader_vda >= fs->length) {
+        of->error = TRUE;
         return FALSE;
+    }
 
     of->fe = *fe;
     of->pos.pgnum = 1;
     of->pos.pos = 0;
 
-    pg = &fs->pages[fe->leader_vda];
+    if (!include_leader) {
+        pg = &fs->pages[fe->leader_vda];
+        rda = pg->label.next_rda;
+        if (!real_to_virtual(fs, rda, &of->pos.vda)) {
+            of->error = TRUE;
+            return FALSE;
+        }
+    } else {
+        of->pos.vda = of->fe.leader_vda;
+    }
 
-    rda = pg->label.next_rda;
-    if (unlikely(!real_to_virtual(fs, rda, &of->pos.vda)))
-        return FALSE;
-
+    of->error = FALSE;
     return TRUE;
 }
 
@@ -398,20 +430,40 @@ size_t fs_read(const struct fs *fs, struct open_file *of,
     uint16_t vda, rda, nbytes;
     size_t pos;
 
+    if (of->error) {
+        report_error("fs: read: error on file");
+        return FALSE;
+    }
+
     pos = 0;
     while (len > 0) {
         vda = of->pos.vda;
 
         /* Checks if reached the end of the file. */
         if (vda == 0) break;
-        if (unlikely(vda >= fs->length)) break;
+        if (vda >= fs->length) {
+            of->error = TRUE;
+            report_error("fs: read: invalid VDA: %u", vda);
+            break;
+        }
 
         pg = &fs->pages[vda];
 
         /* Sanity check. */
-        if (unlikely(pg->label.file_pgnum != of->pos.pgnum))
+        if (pg->label.file_pgnum != of->pos.pgnum) {
+            of->error = TRUE;
+            report_error("fs: read: inconsistent page numbers");
             break;
+        }
 
+        /* Another sanity check. */
+        if (of->pos.pos > pg->label.nbytes) {
+            of->error = TRUE;
+            report_error("fs: read: inconsistent offset in page");
+            break;
+        }
+
+        /* If has not reached the end of the page. */
         if (of->pos.pos < pg->label.nbytes) {
             nbytes = pg->label.nbytes - of->pos.pos;
             if (nbytes > len) nbytes = len;
@@ -424,21 +476,227 @@ size_t fs_read(const struct fs *fs, struct open_file *of,
             of->pos.pos += nbytes;
             pos += nbytes;
             len -= nbytes;
-        } else if (unlikely(of->pos.pos > pg->label.nbytes)) {
-            break;
-        } else {
-            rda = pg->label.next_rda;
-            if (unlikely(!real_to_virtual(fs, rda, &of->pos.vda)))
-                break;
-            of->pos.pos = 0;
-            if (of->pos.vda != 0)
-                of->pos.pgnum += 1;
-            else
-                of->pos.pgnum = 0;
+            continue;
         }
+
+        /* Go to the next page. */
+        rda = pg->label.next_rda;
+        if (!real_to_virtual(fs, rda, &of->pos.vda)) {
+            of->error = TRUE;
+            report_error("fs: read: could not convert real "
+                         "to virtual disk address");
+            break;
+        }
+
+        /* If there is a valid next page. */
+        if (of->pos.vda != 0) {
+            of->pos.pos = 0;
+            of->pos.pgnum += 1;
+            continue;
+        }
+
+        /* Reached the end of file. */
+        of->pos.pgnum = 0;
     }
 
     return pos;
+}
+
+/* Finds a free page within the filesystem.
+ * The virtual disk address is returned in `free_vda`.
+ * Returns TRUE on success.
+ */
+static
+int find_free_page(struct fs *fs, uint16_t *free_vda)
+{
+    uint16_t vda;
+    const struct page *pg;
+
+    for (vda = 0; vda < fs->length; vda++) {
+        pg = &fs->pages[vda];
+        if (pg->label.version == VERSION_FREE) {
+            *free_vda = vda;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+size_t fs_write(struct fs *fs, struct open_file *of,
+                const uint8_t *src, size_t len, int extend)
+{
+    struct page *pg, *new_pg;
+    uint16_t vda, rda, nbytes;
+    size_t pos;
+
+    if (of->error) {
+        report_error("fs: write: error on file");
+        return FALSE;
+    }
+
+    pos = 0;
+    while (len > 0) {
+        vda = of->pos.vda;
+
+        /* Checks if reached the end of the file. */
+        if (vda == 0) break;
+        if (vda >= fs->length) {
+            of->error = TRUE;
+            report_error("fs: write: invalid VDA: %u", vda);
+            break;
+        }
+
+        pg = &fs->pages[vda];
+
+        /* Sanity check. */
+        if (pg->label.file_pgnum != of->pos.pgnum) {
+            of->error = TRUE;
+            report_error("fs: write: inconsistent page numbers");
+            break;
+        }
+
+        /* Another sanity check. */
+        if (of->pos.pos > pg->label.nbytes) {
+            of->error = TRUE;
+            report_error("fs: write: inconsistent offset in page");
+            break;
+        }
+
+        /* If has not reached the end of the page. */
+        if (of->pos.pos < pg->label.nbytes) {
+            nbytes = pg->label.nbytes - of->pos.pos;
+            if (nbytes > len) nbytes = len;
+
+            if (src) {
+                memcpy(&pg->data[of->pos.pos], &src[pos], nbytes);
+            }
+
+            of->pos.pos += nbytes;
+            pos += nbytes;
+            len -= nbytes;
+            continue;
+        }
+
+        /* Go to the next page. */
+        rda = pg->label.next_rda;
+        if (!real_to_virtual(fs, rda, &of->pos.vda)) {
+            of->error = TRUE;
+            report_error("fs: write: could not convert real "
+                         "to virtual disk address");
+            break;
+        }
+
+
+        /* If there is a valid next page. */
+        if (of->pos.vda != 0) {
+            of->pos.pos = 0;
+            of->pos.pgnum += 1;
+            continue;
+        }
+
+        if (!extend) break;
+
+        /* Check if the last page can be extended. */
+        of->pos.vda = vda;
+        if (pg->label.nbytes < PAGE_DATA_SIZE) {
+            nbytes = PAGE_DATA_SIZE - pg->label.nbytes;
+            if (nbytes > len) nbytes = len;
+
+            pg->label.nbytes += nbytes;
+            continue;
+        }
+
+        /* Otherwise, allocate a new page. */
+        if (!find_free_page(fs, &vda)) {
+            of->error = TRUE;
+            report_error("fs: write: disk full");
+            break;
+        }
+
+        new_pg = &fs->pages[vda];
+
+        if (!virtual_to_real(fs, pg->page_vda, &new_pg->label.prev_rda)) {
+            of->error = TRUE;
+            report_error("fs: write: could not convert virtual "
+                         "to real disk address");
+            break;
+        }
+
+        if (!virtual_to_real(fs, new_pg->page_vda, &pg->label.next_rda)) {
+            of->error = TRUE;
+            report_error("fs: write: could not convert virtual "
+                         "to real disk address");
+            break;
+        }
+
+        nbytes = len;
+        if (nbytes > PAGE_DATA_SIZE)
+            nbytes = PAGE_DATA_SIZE;
+
+        new_pg->label.next_rda = 0;
+        new_pg->label.nbytes = nbytes;
+        new_pg->label.file_pgnum = pg->label.file_pgnum + 1;
+        new_pg->label.version = pg->label.version;
+        new_pg->label.sn = pg->label.sn;
+    }
+
+    return pos;
+}
+
+int fs_trim(struct fs *fs, struct open_file *of)
+{
+    struct page *pg;
+    uint16_t vda, rda;
+    int should_keep;
+
+    if (of->error) {
+        report_error("fs: trim: error on file");
+        return FALSE;
+    }
+
+    should_keep = TRUE;
+    vda = of->pos.vda;
+    while (vda != 0) {
+        if (vda >= fs->length) {
+            of->error = TRUE;
+            report_error("fs: trim: invalid VDA: %u", vda);
+            break;
+        }
+
+        pg = &fs->pages[vda];
+        rda = pg->label.next_rda;
+
+        if (!should_keep) {
+            /* Remove the page. */
+            pg->label.version = VERSION_FREE;
+            pg->label.prev_rda = 0;
+            pg->label.next_rda = 0;
+        }
+
+        if (vda == of->pos.vda) {
+            pg->label.nbytes = of->pos.pos;
+            /* If the current page is full, keep the next page. */
+            if (pg->label.nbytes != PAGE_DATA_SIZE) {
+                pg->label.next_rda = 0;
+                should_keep = FALSE;
+            }
+        } else if (should_keep) {
+            /* Set nbytes to zero in the page after the current. */
+            pg->label.nbytes = 0;
+            pg->label.next_rda = 0;
+            should_keep = FALSE;
+        }
+
+        /* Go to the next page. */
+        if (!real_to_virtual(fs, rda, &vda)) {
+            of->error = TRUE;
+            report_error("fs: trim: could not convert real "
+                         "to virtual disk address");
+            break;
+        }
+    }
+
+    return TRUE;
 }
 
 int fs_extract_file(const struct fs *fs, const struct file_entry *fe,
@@ -450,19 +708,31 @@ int fs_extract_file(const struct fs *fs, const struct file_entry *fe,
     size_t nbytes;
     size_t ret;
 
-    if (unlikely(!fs_open(fs, fe, &of)))
+    if (!fs_open(fs, fe, &of, FALSE)) {
+        report_error("fs: extract_file: could not open filesystem file");
         return FALSE;
+    }
 
     fp = fopen(output_filename, "wb");
-    if (unlikely(!fp))
+    if (!fp) {
+        report_error("fs: extract_file: could not open `%s` "
+                     "for writing", output_filename);
         return FALSE;
+    }
 
     while (TRUE) {
         nbytes = fs_read(fs, &of, buffer, sizeof(buffer));
+        if (of.error) {
+            report_error("fs: extract_file: error while reading");
+            fclose(fp);
+            return FALSE;
+        }
 
         if (nbytes > 0) {
             ret = fwrite(buffer, 1, nbytes, fp);
-            if (unlikely(ret != nbytes)) {
+            if (ret != nbytes) {
+                report_error("fs: extract_file: error while writing "
+                             "`%s`", output_filename);
                 fclose(fp);
                 return FALSE;
             }
@@ -475,13 +745,62 @@ int fs_extract_file(const struct fs *fs, const struct file_entry *fe,
     return TRUE;
 }
 
+int fs_replace_file(struct fs *fs, const struct file_entry *fe,
+                    const char *input_filename)
+{
+    uint8_t buffer[PAGE_DATA_SIZE];
+    struct open_file of;
+    FILE *fp;
+    size_t nbytes;
+    size_t ret;
+
+    if (!fs_open(fs, fe, &of, FALSE)) {
+        report_error("fs: replace_file: could not open filesystem file");
+        return FALSE;
+    }
+
+    fp = fopen(input_filename, "rb");
+    if (!fp) {
+        report_error("fs: repalce_file: could not open `%s`",
+                     input_filename);
+        return FALSE;
+    }
+
+    while (TRUE) {
+        nbytes = fread(buffer, 1, sizeof(buffer), fp);
+
+        if (nbytes > 0) {
+            ret = fs_write(fs, &of, buffer, nbytes, TRUE);
+            if (of.error || (ret != nbytes)) {
+                report_error("fs: replace_file: error while writing");
+                fclose(fp);
+                return FALSE;
+            }
+        }
+
+        if (nbytes < sizeof(buffer)) break;
+    }
+
+    if (!fs_trim(fs, &of)) {
+        report_error("fs: replace_file: could not trim");
+        fclose(fp);
+        return FALSE;
+    }
+
+    fclose(fp);
+    return TRUE;
+}
+
 int fs_file_entry(const struct fs *fs, uint16_t leader_vda,
                   struct file_entry *fe)
 {
     const struct page *pg;
 
-    if (leader_vda >= fs->length)
+    if (leader_vda >= fs->length) {
+        report_error("fs: file_entry: invalid VDA: %u",
+                     leader_vda);
         return FALSE;
+    }
 
     pg = &fs->pages[leader_vda];
     fe->sn = pg->label.sn;
@@ -497,12 +816,19 @@ int fs_file_length(const struct fs *fs, const struct file_entry *fe,
     struct open_file of;
     size_t l, nbytes;
 
-    if (unlikely(!fs_open(fs, fe, &of)))
+    if (!fs_open(fs, fe, &of, FALSE)) {
+        report_error("fs: file_length: could not open filesystem file");
         return FALSE;
+    }
 
     l = 0;
     while (TRUE) {
         nbytes = fs_read(fs, &of, NULL, PAGE_DATA_SIZE);
+        if (of.error) {
+            report_error("fs: file_length: error while reading");
+            return FALSE;
+        }
+
         l += nbytes;
         if (nbytes != PAGE_DATA_SIZE) break;
     }
@@ -516,18 +842,17 @@ int fs_file_info(const struct fs *fs, const struct file_entry *fe,
 {
     const struct page *pg;
 
-    if (fe->leader_vda >= fs->length)
+    if (fe->leader_vda >= fs->length) {
+        report_error("fs: file_info: invalid VDA: %u",
+                     fe->leader_vda);
         return FALSE;
+    }
 
     pg = &fs->pages[fe->leader_vda];
     copy_name(finfo->filename, (const char *) &pg->data[LEADER_FILENAME]);
     finfo->created = read_alto_time(pg->data, LEADER_CREATED);
     finfo->written = read_alto_time(pg->data, LEADER_WRITTEN);
     finfo->read = read_alto_time(pg->data, LEADER_READ);
-
-    memcpy(finfo->props, &pg->data[LEADER_PROPS], LEADER_SPARE - LEADER_PROPS);
-    finfo->props_len = pg->data[LEADER_PROPLEN];
-    finfo->props_begin = pg->data[LEADER_PROPBEGIN];
 
     finfo->consecutive = pg->data[LEADER_CONSECUTIVE];
     finfo->change_sn = pg->data[LEADER_CHANGESN];
@@ -556,7 +881,10 @@ int find_file_cb(const struct fs *fs,
     struct file_info finfo;
 
     res = (struct find_result *) arg;
-    if (unlikely(!fs_file_info(fs, &de->fe, &finfo))) return -1;
+    if (!fs_file_info(fs, &de->fe, &finfo)) {
+        report_error("fs: find_file: could not get file information");
+        return -1;
+    }
 
     if (strncmp(finfo.filename, res->filename, res->flen) == 0) {
         res->fe = de->fe;
@@ -575,8 +903,10 @@ int fs_find_file(const struct fs *fs, const char *filename,
     struct file_entry cur_fe;
     size_t pos, npos;
 
-    if (unlikely(!fs_file_entry(fs, 1, &root_fe)))
+    if (!fs_file_entry(fs, 1, &root_fe)) {
+        report_error("fs: find_file: error finding SysDir");
         return FALSE;
+    }
 
     pos = 0;
     cur_fe = root_fe;
@@ -600,15 +930,20 @@ int fs_find_file(const struct fs *fs, const char *filename,
 
         if (res.flen >= FILENAME_LENGTH) return FALSE;
 
-        if (unlikely(!fs_scan_directory(fs, &cur_fe, &find_file_cb, &res)))
+        if (!fs_scan_directory(fs, &cur_fe, &find_file_cb, &res)) {
+            report_error("fs: find_file: could not scan directory");
             return FALSE;
+        }
 
         if (!res.found) return FALSE;
         cur_fe = res.fe;
 
         if (filename[npos] == '>') {
             /* Checks if its a directory. */
-            if (!(cur_fe.sn.word1 & SN_DIRECTORY)) return FALSE;
+            if (!(cur_fe.sn.word1 & SN_DIRECTORY)) {
+                report_error("fs: find_file: not a valid directory");
+                return FALSE;
+            }
             npos++;
         }
 
@@ -632,7 +967,10 @@ int scavenge_file_cb(const struct fs *fs,
     struct file_info finfo;
 
     res = (struct scavenge_result *) arg;
-    if (unlikely(!fs_file_info(fs, fe, &finfo))) return -1;
+    if (!fs_file_info(fs, fe, &finfo)) {
+        report_error("fs: scavenge_file: could not get file information");
+        return -1;
+    }
 
     if (strcmp(finfo.filename, res->filename) == 0) {
         res->fe = *fe;
@@ -651,8 +989,10 @@ int fs_scavenge_file(const struct fs *fs, const char *filename,
 
     res.filename = filename;
     res.found = 0;
-    if (unlikely(!fs_scan_files(fs, &scavenge_file_cb, &res)))
+    if (!fs_scan_files(fs, &scavenge_file_cb, &res)) {
+        report_error("fs: scavenge_file: could not scan filesystem");
         return FALSE;
+    }
 
     if (res.found == 1) {
         *fe = res.fe;
@@ -682,7 +1022,10 @@ int fs_scan_files(const struct fs *fs, scan_files_cb cb, void *arg)
         fe.leader_vda = vda;
 
         ret = cb(fs, &fe, arg);
-        if (ret < 0) return FALSE;
+        if (ret < 0) {
+            report_error("fs: scan_files: error while scanning");
+            return FALSE;
+        }
         if (ret == 0) break;
     }
 
@@ -699,31 +1042,41 @@ int fs_scan_directory(const struct fs *fs, const struct file_entry *fe,
     size_t to_read, nbytes;
     int ret, is_valid;
 
-    if (unlikely(!fs_open(fs, fe, &of)))
+    if (!fs_open(fs, fe, &of, FALSE)) {
+        report_error("fs: scan_directory: could not open directory");
         return FALSE;
+    }
 
     while (TRUE) {
         nbytes = fs_read(fs, &of, buffer, 2);
+        if (of.error) goto error_read;
+
         if (nbytes == 0) break;
-        if (nbytes != 2) return FALSE;
+        if (nbytes != 2) goto error_short;
 
         w = read_word_bs(buffer, 0);
         is_valid = ((w >> 10) == DIR_ENTRY_VALID);
 
         de_len = (w & DIR_ENTRY_LEN_MASK);
-        if (de_len == 0) return FALSE;
+        if (de_len == 0) {
+            report_error("fs: scan_directory: invalid entry length");
+            return FALSE;
+        }
 
         to_read = 2 * ((size_t) de_len);
         if (to_read > sizeof(buffer)) {
             nbytes = fs_read(fs, &of, &buffer[2], sizeof(buffer) - 2);
-            if (nbytes != sizeof(buffer) - 2) return FALSE;
+            if (of.error) goto error_read;
+            if (nbytes != sizeof(buffer) - 2) goto error_short;
 
             to_read -= sizeof(buffer);
             nbytes = fs_read(fs, &of, NULL, to_read);
-            if (nbytes != to_read) return FALSE;
+            if (of.error) goto error_read;
+            if (nbytes != to_read) goto error_short;
         } else {
             nbytes = fs_read(fs, &of, &buffer[2], to_read - 2);
-            if (nbytes != to_read - 2) return FALSE;
+            if (of.error) goto error_read;
+            if (nbytes != to_read - 2) goto error_short;
         }
 
         if (!is_valid) continue;
@@ -740,6 +1093,14 @@ int fs_scan_directory(const struct fs *fs, const struct file_entry *fe,
     }
 
     return TRUE;
+
+error_read:
+    report_error("fs: scan_directory: error while reading");
+    return FALSE;
+
+error_short:
+    report_error("fs: scan_directory: entry too short");
+    return FALSE;
 }
 
 /* Converts a real address to a virtual address.
