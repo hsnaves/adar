@@ -60,7 +60,8 @@ int print_files_cb(const struct fs *fs,
 
     if (verbose) {
         printf("Leader VDA: %u\n", fe->leader_vda);
-        printf("Serial number: %u\n", fe->sn.word2);
+        printf("Serial number: %u\n",
+               ((fe->sn.word1 & SN_PART1_MASK) << 16) | fe->sn.word2);
         printf("Version: %u\n", fe->version);
         printf("Name: %s\n", finfo.filename);
         printf("Length: %u\n", (unsigned int) length);
@@ -119,7 +120,8 @@ int print_dir_cb(const struct fs *fs,
 
     if (verbose) {
         printf("Leader VDA: %u\n", de->fe.leader_vda);
-        printf("Serial number: %u\n", de->fe.sn.word2);
+        printf("Serial number: %u\n",
+               ((de->fe.sn.word1 & SN_PART1_MASK) << 16) | de->fe.sn.word2);
         printf("Version: %u\n", de->fe.version);
         printf("Name: %s\n", de->filename);
         printf("Length: %u\n", (unsigned int) length);
